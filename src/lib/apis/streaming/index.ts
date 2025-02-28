@@ -5,8 +5,9 @@ type TextStreamUpdate = {
 	done: boolean;
 	value: string;
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	citations?: any;
+	sources?: any;
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	selectedModelId?: any;
 	error?: any;
 	usage?: ResponseUsage;
 };
@@ -18,6 +19,8 @@ type ResponseUsage = {
 	completion_tokens: number;
 	/** Sum of the above two fields */
 	total_tokens: number;
+	/** Any other fields that aren't part of the base OpenAI spec */
+	[other: string]: unknown;
 };
 
 // createOpenAITextStream takes a responseBody with a SSE response,
@@ -64,15 +67,24 @@ async function* openAIStreamToIterator(
 				break;
 			}
 
-			if (parsedData.citations) {
-				yield { done: false, value: '', citations: parsedData.citations };
+			if (parsedData.sources) {
+				yield { done: false, value: '', sources: parsedData.sources };
+				continue;
+			}
+
+			if (parsedData.selected_model_id) {
+				yield { done: false, value: '', selectedModelId: parsedData.selected_model_id };
+				continue;
+			}
+
+			if (parsedData.usage) {
+				yield { done: false, value: '', usage: parsedData.usage };
 				continue;
 			}
 
 			yield {
 				done: false,
-				value: parsedData.choices?.[0]?.delta?.content ?? '',
-				usage: parsedData.usage
+				value: parsedData.choices?.[0]?.delta?.content ?? ''
 			};
 		} catch (e) {
 			console.error('Error extracting delta from SSE event:', e);
@@ -90,10 +102,24 @@ async function* streamLargeDeltasAsRandomChunks(
 			yield textStreamUpdate;
 			return;
 		}
-		if (textStreamUpdate.citations) {
+
+		if (textStreamUpdate.error) {
 			yield textStreamUpdate;
 			continue;
 		}
+		if (textStreamUpdate.sources) {
+			yield textStreamUpdate;
+			continue;
+		}
+		if (textStreamUpdate.selectedModelId) {
+			yield textStreamUpdate;
+			continue;
+		}
+		if (textStreamUpdate.usage) {
+			yield textStreamUpdate;
+			continue;
+		}
+
 		let content = textStreamUpdate.value;
 		if (content.length < 5) {
 			yield { done: false, value: content };
