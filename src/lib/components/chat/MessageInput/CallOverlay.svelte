@@ -1,9 +1,6 @@
 <script lang="ts">
-	import { config, models, settings, showCallOverlay } from '$lib/stores';
+	import { config, models, settings, showCallOverlay, TTSWorker } from '$lib/stores';
 	import { onMount, tick, getContext, onDestroy, createEventDispatcher } from 'svelte';
-	import { DropdownMenu } from 'bits-ui';
-	import Dropdown from '$lib/components/common/Dropdown.svelte';
-	import { flyAndScale } from '$lib/utils/transitions';
 
 	const dispatch = createEventDispatcher();
 
@@ -15,6 +12,7 @@
 
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import VideoInputMenu from './CallOverlay/VideoInputMenu.svelte';
+	import { KokoroWorker } from '$lib/workers/KokoroWorker';
 
 	const i18n = getContext('i18n');
 
@@ -35,12 +33,10 @@
 	let assistantSpeaking = false;
 
 	let emoji = null;
-
 	let camera = false;
 	let cameraStream = null;
 
 	let chatStreaming = false;
-
 	let rmsLevel = 0;
 	let hasStartedSpeaking = false;
 	let mediaRecorder;
@@ -158,7 +154,7 @@
 		const file = blobToFile(audioBlob, 'recording.wav');
 
 		const res = await transcribeAudio(localStorage.token, file).catch((error) => {
-			toast.error(error);
+			toast.error(`${error}`);
 			return null;
 		});
 
@@ -220,32 +216,47 @@
 	};
 
 	const startRecording = async () => {
-		if (!audioStream) {
-			audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-		}
-		mediaRecorder = new MediaRecorder(audioStream);
-
-		mediaRecorder.onstart = () => {
-			console.log('Recording started');
-			audioChunks = [];
-			analyseAudio(audioStream);
-		};
-
-		mediaRecorder.ondataavailable = (event) => {
-			if (hasStartedSpeaking) {
-				audioChunks.push(event.data);
+		if ($showCallOverlay) {
+			if (!audioStream) {
+				audioStream = await navigator.mediaDevices.getUserMedia({
+					audio: {
+						echoCancellation: true,
+						noiseSuppression: true,
+						autoGainControl: true
+					}
+				});
 			}
-		};
+			mediaRecorder = new MediaRecorder(audioStream);
 
-		mediaRecorder.onstop = (e) => {
-			console.log('Recording stopped', audioStream, e);
-			stopRecordingCallback();
-		};
+			mediaRecorder.onstart = () => {
+				console.log('Recording started');
+				audioChunks = [];
+			};
 
-		mediaRecorder.start();
+			mediaRecorder.ondataavailable = (event) => {
+				if (hasStartedSpeaking) {
+					audioChunks.push(event.data);
+				}
+			};
+
+			mediaRecorder.onstop = (e) => {
+				console.log('Recording stopped', audioStream, e);
+				stopRecordingCallback();
+			};
+
+			analyseAudio(audioStream);
+		}
 	};
 
 	const stopAudioStream = async () => {
+		try {
+			if (mediaRecorder) {
+				mediaRecorder.stop();
+			}
+		} catch (error) {
+			console.log('Error stopping audio stream:', error);
+		}
+
 		if (!audioStream) return;
 
 		audioStream.getAudioTracks().forEach(function (track) {
@@ -309,6 +320,9 @@
 				if (hasSound) {
 					// BIG RED TEXT
 					console.log('%c%s', 'color: red; font-size: 20px;', '🔊 Sound detected');
+					if (mediaRecorder && mediaRecorder.state !== 'recording') {
+						mediaRecorder.start();
+					}
 
 					if (!hasStartedSpeaking) {
 						hasStartedSpeaking = true;
@@ -448,10 +462,26 @@
 					}
 				}
 
-				if ($config.audio.tts.engine !== '') {
+				if ($settings.audio?.tts?.engine === 'browser-kokoro') {
+					const blob = await $TTSWorker
+						.generate({
+							text: content,
+							voice: $settings?.audio?.tts?.voice ?? $config?.audio?.tts?.voice
+						})
+						.catch((error) => {
+							console.error(error);
+							toast.error(`${error}`);
+						});
+
+					if (blob) {
+						audioCache.set(content, new Audio(blob));
+					}
+				} else if ($config.audio.tts.engine !== '') {
 					const res = await synthesizeOpenAISpeech(
 						localStorage.token,
-						$settings?.audio?.tts?.voice ?? $config?.audio?.tts?.voice,
+						$settings?.audio?.tts?.defaultVoice === $config.audio.tts.voice
+							? ($settings?.audio?.tts?.voice ?? $config?.audio?.tts?.voice)
+							: $config?.audio?.tts?.voice,
 						content
 					).catch((error) => {
 						console.error(error);
@@ -640,19 +670,18 @@
 
 	onDestroy(async () => {
 		await stopAllAudio();
-		stopAudioStream();
+		await stopRecordingCallback(false);
+		await stopCamera();
 
+		await stopAudioStream();
 		eventTarget.removeEventListener('chat:start', chatStartHandler);
 		eventTarget.removeEventListener('chat', chatEventHandler);
 		eventTarget.removeEventListener('chat:finish', chatFinishHandler);
-
 		audioAbortController.abort();
+
 		await tick();
 
 		await stopAllAudio();
-
-		await stopRecordingCallback(false);
-		await stopCamera();
 	});
 </script>
 
